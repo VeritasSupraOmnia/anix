@@ -1,0 +1,125 @@
+; translate rdtsc values to nanosecond values based on cpuid 0x15 tsc ratios
+%include "head.ah"
+%include "syscall.ah"
+c_fehdr main
+main:
+ nop
+ %include "hdrs/perftimerstart.ah"
+ ;input argument handling: no argc -> input on stdin into stack
+ lea rax, [rsp+16] ; grab hex argument (needs testing)
+ mov rax, [rax]
+ cmp [rsp], dword 2 ; little endian is based, btw
+ jge hasargs
+ sub rsp, 16
+ xor eax, eax
+ xor edi, edi
+ mov rsi, rsp
+ mov edx, 16
+ syscall	; read into stack the first hex argument
+ mov rax, rsp
+hasargs:
+ ; assume "0x" prefix, and ignore it, find extent by nullterm
+ vpbroadcastb xmm1, [rel nl]
+ vpcmpeqb ymm1, [rax+2]
+ vpmovmskb rbx, ymm1
+ tzcnt ebx, ebx
+ mov [rax+2+rbx], byte 0 ; remove
+
+ pxor xmm0, xmm0
+ vpcmpeqb ymm0, [rax+2]
+ vpmovmskb rbx, ymm0
+ tzcnt ebx, ebx ; for -1 shl-anding of high, non-arg hex input values later on
+ shl ebx, 2 ; *4 for nibbles? will NOT the mask so and works, nand maybe
+ mov ecx, 64
+ xchg ebx, ecx
+ sub ebx, ecx
+ ; convert hex to binary
+ vpbroadcastb xmm4,[rel thirtynine]
+ vpbroadcastb xmm5,[rel seven]
+ vpbroadcastw xmm6,[rel eff]
+ movdqu xmm0, [rax+2]
+ vpcmpgtb xmm1, xmm0, xmm4
+ pand xmm1,xmm5
+ psubb xmm0, xmm1; at this point, char hex bytes normalized
+ vpand xmm2,xmm0, xmm6 
+ vpslld xmm6, xmm6, 8
+ vpand xmm1, xmm0, xmm6
+ psrld xmm1, 8
+ pslld xmm2, 4
+ vpor xmm0,xmm2,xmm1 ; get low nibble in high byte and shift to high nibble in low byte
+
+ ; packing into low qword and converting to normal LE
+ vpshufb xmm0, xmm0, [rel ishuf]
+ movq r14, xmm0
+ bswap r14
+ shrx r14, r14, rbx ; r14 is de-hexed tsc value to alter to nanosecs
+
+ ; get tsc ratio
+ mov eax, 0x15
+ mov ebx, eax
+ mov ecx, eax
+ cpuid
+ ; ebx is numerator
+ ; eax is denominator
+ ; ecx is hertz
+ ; b and c must be nonzero
+
+ ; convert tsc to nanosecs via integer math
+ xor edx, edx
+ xchg rcx, rax
+ mul rbx
+ xor edx, edx
+ div rcx
+ xchg rcx, rax
+ mov rax, [rel femto]
+ div rcx
+ mul r14
+ xor edx, edx
+ div qword [rel mili]
+ lzcnt rcx, rax
+ and ecx, 0xfc
+ shr ecx, 2
+
+ ; export hex of final value (don't need decimal as this should go into shell $(( ))
+ movq xmm0, rax
+ vpbroadcastb xmm3, [rel thirty]
+ vpshufb xmm0, [rel oshuf] 
+ movdqu xmm1, xmm0
+ psrlw  xmm0, 4
+ pand xmm1, xmm6
+ psrlw  xmm6, 8
+ pand xmm0, xmm6
+ vpor xmm0, xmm1
+ vpor xmm0, xmm3
+ vpcmpgtb xmm2, xmm0, xmm4
+ pand xmm2, xmm5
+ paddb xmm0, xmm2
+ movdqu [rel hexout+2], xmm0
+ mov [rel hexout+18], byte 0xa
+ mov [hexout+rcx], word "0x"
+ ; Might need to develop a script to deal with tranlating this output data as ratios 
+ ;  to a single second.
+ lea rsi, [hexout+rcx]
+ mov edx, 19
+ sub edx, ecx
+ mov eax, 1
+ mov edi, eax
+ syscall
+ %include "hdrs/perftimerend.ah"
+nomex:
+ nominal_exit
+ thirtynine: db 0x39
+ thirty: db 0x30
+ seven: db 7
+ eff: db 0x0f,0
+ nl: db 0xa
+ ishuf: db 0,2,4,6,8,10,12,14
+ oshuf: db 7,7,6,6, 5,5,4,4, 3,3,2,2, 1,1,0,0
+ base:dq 1
+ femto:dq 1000000000000000 
+ mili: dq 1000000
+c_ftr
+ hexout: resb 19
+ divi: resq 1
+ %include "hdrs/perftimermem.ah"
+e_bss

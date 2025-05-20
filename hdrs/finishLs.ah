@@ -1,0 +1,35 @@
+ ; find total
+ mov edx, [outtot]
+ ; print list
+ mov eax, sys_write
+ mov edi, eax;stdout
+ mov esi, out;[out]
+ syscall
+ %include "hdrs/perftimerend.ah"
+ %include "hdrs/perftimerprint.ah"
+ nominal_exit
+localpath: db "./",0
+nl: db 0xa
+dirp: dq dirb
+one: db 1
+c_ftr
+ %ifdef stringfind
+ cstringp: resq 1
+ cstringb: resb 64
+ %endif
+ %ifdef doroot 
+ cpath: resb 256
+ tpath: resb 256
+ %endif
+ %ifdef dopath
+ path: resq 1
+ %endif
+ dentsfd: resd 1
+ dentloc: resq 1 ; location of current dirent to read filename from
+ dentstot: resd 1 ; total
+ outtot: resd 1 ; total
+ %include "hdrs/perftimermem.ah"
+ alignb 4096
+ dirb: resb dentsbuffsize
+ out: resb dentsbuffsize
+e_bss

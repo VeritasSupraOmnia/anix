@@ -1,0 +1,8 @@
+%ifdef perftest ; use return value as tsc deltas - fuck posix BS
+ ; calculate time taken to print filename list
+ rdtscp
+ shl rdx, 32
+ or rax, rdx
+ sub rax, [timestart]
+ mov [timestart], rax
+%endif

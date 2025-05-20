@@ -1,0 +1,42 @@
+%include "head.ah"
+%include "syscall.ah"
+c_fehdr main
+wrngname: db "Rm: Given name does not match real file.",0xa
+lwrngnm: db $-wrngname
+nname: db "Rm: No name given to unlink.",0xa
+lnnm: db $-nname
+main:
+nop
+%include "hdrs/perftimerstart.ah"
+ cmp [rsp], word 2
+ jl noname
+ add rsp, 16
+ mov rdi, [rsp]
+ mov eax, sys_unlink
+ syscall
+ cmp ax, 0
+ jne maybedir
+%include "hdrs/perftimerend.ah"
+nomexit:
+ nominal_exit
+maybedir:
+ mov eax, sys_rmdir
+ mov rdi, [rsp]
+ syscall
+ cmp ax, 0
+ je nomexit
+wrongname:
+ mov esi, wrngname
+ movzx edx, byte [lwrngnm]
+ jmp catexit
+noname:
+ mov esi, nname
+ movzx edx, byte [lnnm]
+catexit:
+ mov eax, sys_write
+ mov edi, 2
+ syscall
+ catastrophic_exit
+c_ftr
+%include "hdrs/perftimermem.ah"
+e_bss

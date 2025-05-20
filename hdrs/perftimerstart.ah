@@ -1,0 +1,23 @@
+ %ifdef perftest
+ rdtscp
+ shl rdx, 32
+ or rax, rdx
+ mov [timestart], rax
+ %endif
+%macro ptimerstart 1
+%ifdef perftest
+ rdtscp
+ shl rdx, 32
+ or rax, rdx
+ mov [%1], rax
+%endif
+%endmacro 
+%macro ptimerend 1
+%ifdef perftest
+ rdtscp
+ shl rdx, 32
+ or rax, rdx
+ sub rax, [%1]
+ mov [%1], rax
+%endif
+%endmacro 

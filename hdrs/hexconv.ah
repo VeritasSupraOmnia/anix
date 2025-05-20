@@ -1,0 +1,27 @@
+%push hexconv
+ ; translate time to hex
+ pdep rbx, rax, [%$nibbles]
+ shr rax, 32
+ pext rax, rax, [%$nibbles]
+ movq xmm1, rbx
+ pinsrq xmm1, rax, 1
+ mov al, 0x9
+ movd xmm5, eax
+ mov al, 0x7
+ movd xmm6, eax
+ mov al, 0x30
+ movd xmm7, eax
+ vpbroadcastb xmm5, xmm5
+ vpbroadcastb xmm6, xmm6
+ vpbroadcastb xmm7, xmm7
+ vpcmpgtb xmm4, xmm1, xmm5
+ vpand xmm4, xmm4, xmm6
+ por xmm1, xmm7
+ vpaddb xmm1, xmm4
+ movdqu xmm2, [%$shuff] 
+ pshufb xmm1, xmm2
+ jmp %$endtimehex
+%$nibbles: dq 0x0f0f0f0f0f0f0f0f
+%$shuff: db 15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,9,0
+%$endtimehex:
+%pop

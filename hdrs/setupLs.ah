@@ -1,0 +1,156 @@
+%include "head.ah"
+%include "syscall.ah"
+%ifndef bigbuff
+%define dentsbuffsize 1024*1024
+%else
+%define dentsbuffsize 10*1024*1024
+%endif
+ ; setup string finding
+ %ifdef docontains ; if contains string
+ %define stringfind 1
+ %endif
+ %ifdef doextension ; if ends in extention (not including the period)
+ %define stringfind 1
+ %endif
+ %ifdef dostart ; if starts with string of characters (not including period if hidden)
+ %define stringfind 1
+ %endif
+ ; setup almostdirs as implicitly inclusive to dirsonly
+ %ifdef almostdirs
+ %define dirsonly
+ %endif
+c_fehdr main
+main:
+ nop
+ %include "hdrs/perftimerstart.ah"
+ mov edi, localpath ; default to local path
+ %ifndef dolocal
+ cmp [rsp], byte 2
+  %ifdef stringfind
+ cmova rdi, [rsp+16]
+  %else
+ cmove rdi, [rsp+16]
+  %endif
+ %else
+ %define dopath
+ %endif
+ %ifdef doroot
+ %define dopath
+ %endif
+ %ifdef dopath
+ mov [rel path], rdi
+ %endif
+ mov eax, sys_open
+ xor esi, esi ; readonly
+ syscall
+ mov [rel dentsfd], eax
+ ; get direntries
+ mov edi, eax
+ mov eax, sys_getdents64
+ mov esi, dirb
+ mov edx, dentsbuffsize
+ syscall
+ mov [rel dentstot], eax
+
+ %ifdef doroot ; deal with cwd call to load absolute path
+ mov eax, sys_getcwd
+ mov edi, cpath
+ mov esi, 256
+ syscall
+ mov eax, sys_chdir
+ mov rdi, [rel path]
+ syscall
+ mov eax, sys_getcwd
+ mov edi, tpath
+ mov esi, 256
+ syscall
+ mov [(tpath-1)+rax], byte '/'
+ mov [tpath+rax], byte 0
+ mov eax, tpath
+ mov [rel path], rax
+ mov eax, sys_chdir
+ mov edi, cpath
+ syscall
+ %endif
+
+
+ %ifdef stringfind
+ pxor xmm6, xmm6; clear empty string buffer
+ vmovdqu [rel cstringb], ymm6
+
+ xor edi, edi
+ xor eax, eax
+  %ifndef dolocal
+ cmp [rsp], byte 2
+ je .singlearg
+ mov rsi, [rsp+24]
+ jmp .doublearg
+.singlearg:
+ mov rsi, [rsp+16] ; contains argument starts one qword earlier with single arg
+.doublearg:
+  %else
+ mov rsi, [rsp+16] 
+  %endif
+
+ ; copy contains string 32 byte buffer
+  %ifdef docontains
+ vmovdqu ymm0, [rsi]
+ vmovdqu [rel cstringb], ymm0
+  %endif
+  %ifdef doextension
+ vmovdqu ymm0, [rsi]
+ vmovdqu [rel cstringb+1], ymm0
+ mov [rel cstringb], byte '.'
+  %endif
+ mov rdi, cstringb
+ xor eax,eax
+ mov ecx, 32
+ repne scasb ; find end of string
+ rep stosb ; zero string after 32
+ vpcmpeqb ymm0, ymm0
+ vpcmpeqb ymm5, ymm6, [rel cstringb] ; get mask of everything after string
+ vpbroadcastb ymm4, [rel cstringb] ; get first char
+ vmovdqu ymm3, [rel cstringb]
+ vpxor ymm5, ymm0 ; reverse the match for loadmask
+ %endif
+ ; setup vector registers
+ vpbroadcastb ymm7, byte [rel nl]
+ vpcmpeqb ymm2,ymm2
+ pxor xmm6, xmm6
+
+ %ifdef dopath ; deal with possibility of defined path not having ending slash
+ mov rax, [rel path]
+findslash: ; have to do this after contain string copy bc might overwrite in addition
+ vpcmpeqb ymm0, ymm6, [rax]
+ vpmovmskb rbx, ymm0
+ tzcnt ebx, ebx
+ jnc .el ; end was found because CF is set on a zeroed input
+ add rax, 32
+.el:
+ add rax, rbx
+ dec rax
+ cmp [rax], byte "/"
+ je .foundslash
+ mov [rax+1], word 0x002f ; "/\0"  - hex for slash and then null character in LE order
+.foundslash:
+ %endif
+  
+ ; setup filename copy
+ xor eax, eax
+ xor ebx, ebx
+ mov [rel outtot], eax
+ mov rsi, dirb
+ mov [rel dentloc], rsi
+ mov rdi, out
+
+
+; MACRO DEFINITIONS
+ %macro malmostall 0 ; For deleting "." and ".." in the name inclusion decision
+ mov edx, 0xffffff   ;  section of the main loop.
+ and edx, [rax]
+ cmp edx, 0x00002e2e
+ je skipcopy
+ and edx, 0xffff
+ cmp edx, 0x0000002e
+ je skipcopy
+ %endmacro

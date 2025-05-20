@@ -1,0 +1,215 @@
+; contains - checks whether a line contains a single, max 32 byte string
+%include "head.ah"
+%include "syscall.ah"
+%include "sectalloc.ah"
+
+c_fehdr main
+%define buffsize 1024*16;1024
+main:
+nop
+ ; TODO: LOW PRIORITY - Add case insensitive searching nameflag.
+ ; TODO: MEDIUM PRIORITY - Add 8, 16 and 32 multiplexed search algorithms.
+ ; TODO; MEDIUM PRIORITY - Detect if a problem might be solved faster with an
+ ;                          additional thread, then thread it by halving the 
+ ;                          buffer, telling the second thread to start at the
+ ;                          first string after the half and teling the first
+ ;                          to end it's processing at same.
+ %include "hdrs/perftimerstart.ah"
+ ptimerstart SET
+ ; INIT
+ cmp [rsp], dword 2
+ jl catex
+ mov [rel stringsignmask], dword 0
+ ; READ IN CMD ARGUMENTS
+ mov ecx, [rsp] 
+ λλ⊽ggg λ≟hhh θ-c θ⊽ee
+ lea rsi, [rsp+16]
+ ; Don't ingest more arguments that it can handle.
+ cmp ecx, 32
+ jl .notmax
+ mov ecx, 32
+.notmax:
+ mov [rel stringcount], cl
+; Ingest all arguments as strings to search for.
+ xor edx, edx ; counter
+ %ifdef caseinsensitive
+ vpbroadcastb ymm3, [rel sitty]
+ vpbroadcastb ymm4, [rel sevay]
+ vpbroadcastb ymm5, [rel twnty]
+ %endif
+argloop:
+ mov rax, [rsi]
+ ; FIGURE NEGATIVES
+ cmp [rax], byte "!" ; negative search strings start with one "!" char
+ jne .notneg
+ inc rax
+ cmp [rax], byte "!" ; double "!" means escape the negative search, go positive
+ jne .isneg
+ inc rax
+ jmp .notneg
+.isneg:
+ mov ebx, 1
+ shlx ebx, ebx, edx
+ or dword [rel stringsignmask], ebx
+.notneg:
+ vmovdqu ymm0, [rax]
+ λ≟bfa θλ↯ab
+ %ifdef caseinsensitive
+ λζ≰bad λζ≰cae λλ⊼bcb λλ⋀bbf λζ-aab
+ %endif
+ vmovdqu [stringsp+rdi], ymm0
+ tzcnt eax, eax
+ vmovdqu [stringsp+rdi+rax], ymm6 ; clear everything after string
+ vmovdqu [stringsmaskp+rdi], ymm6 ; make mask for proper input checking
+ vmovdqu [stringsmaskp+rdi+rax], ymm7 
+ movd eax, xmm0
+ mov [startchars+rdx], al
+ inc rdx
+ add edi, 32
+ add rsi, 8
+ sub ecx, 1
+ jnz argloop
+
+ ptimerstart LOD
+; DECIDE PROPER SEARCH ALGO AND RECODE THE JUMP TO IT
+ mov rax, 0xff211109050302  ; gt checking
+ movq xmm0, rax 
+ movzx ecx, byte [rel stringcount]
+ movd xmm1, ecx 
+ vpbroadcastb xmm1, xmm1
+ pcmpgtb xmm0, xmm1
+ pmovmskb eax, xmm0 ; max value is 5 to properly index into jump address offset
+ tzcnt eax, eax
+
+; ORGANIZE LOOP AS CONGTIGUOUS
+ mov [rel search-4], dword cjumpret-search
+ mov [rel search-5], byte 0xe9
+ xor ebx, ebx
+ mov es, bx; zero es for direct store
+ mov esi, [searchfunctable+rax*8]  ; Get pointer and size of target search
+ movzx ecx, word [(searchfunctable+4)+rax*8];  function to copy from 
+ movzx r8d, word [(searchfunctable+6)+rax*8] ; get size of setup
+ mov edx, ecx
+ mov edi, search
+ mov eax, 0x20
+.searchfuncopyloop: ; copy search function
+ vmovdqu ymm0, [rsi]
+ vmovdqa [rdi], ymm0
+ θ+fa θ+ea θ+ca ; increment pointers by string size
+ jg .searchfuncopyloop
+ lea edi, [search+rdx]
+ mov esi, copydecision
+ mov ecx, endcopydecision-copydecision
+ add edx, ecx
+ mov eax, 0x20
+.decidecopyloop: ; add decision to end of function
+ vmovdqu ymm0, [rsi]
+ vmovdqu [rdi],ymm0
+ add esi, eax
+ add edi, eax
+ sub ecx, eax
+ jg .decidecopyloop
+ ;calculate return offset
+ mov ebx, edx
+ neg ebx
+ lea eax, [rbx+r8]
+ sub edx, 4 ; to last return of decision
+ mov [search+rdx], eax
+ sub edx, 5 ; calculate offset to pre-search jump back to write
+ mov [search+rdx], ebx
+
+ ptimerend LOD
+ ptimerend SET
+ ptimerstart CAL
+; READ INPUT
+ mov [rel inputsize], dword 0
+doread: ; for right now just do one iteration and move on
+ mov esi, inbuff
+ add esi, [rel inputsize]
+ xor eax, eax
+ xor edi, edi
+ mov edx, buffsize
+ sub edx, [rel inputsize]
+ syscall
+ add [rel inputsize], eax
+.donereading:
+ cmp eax, 0
+ je nomex
+; DO LINE COMPARED COPY
+comparecopy:
+ vpbroadcastb ymm5, [rel nl]
+ mov r13d, inbuff ;[rel inputp]
+ mov r14d, outbuff ;[rel outputp]
+ xor esi, esi ; intput location offset
+ xor edi, edi ; output location offset
+ jmp search
+cjumpret:
+ mov r15d, [rel inputsize]
+ cmp r15, buffsize
+ jl endofinput
+ ; FIX INPUT AND OUTPUT BUFFERS. FIND AND COPY LAST, INCOMPLETE LINE
+findline:
+ xor ecx, ecx
+ mov esi, inbuff
+ mov edi, esi
+ add esi, [rel inputsize]
+.lp:
+ sub esi, 32 ; has to be more than 32 bc must be equal to buffersize
+ vmovdqu ymm0, [rsi]
+ λ≟bag λ≟aaf λλ⋁aab θλ↯aa
+ θ⋗aa θ+ca θ-fa θ≟a# 32
+ je .lp
+copybadline:
+ mov esi, inbuff
+ add esi, [rel inputsize]
+ sub esi, ecx
+ mov [rel inputsize], ecx
+ sub [rel outputsize], ecx
+.lp:
+ vmovdqu ymm0, [rsi]
+ vmovdqu [rdi], ymm0
+ add esi, 32
+ add edi, 32
+ sub ecx, 32
+ jge .lp
+endofinput:
+ mov eax, sys_write
+ mov edi, eax
+ mov esi, outbuff;[rel outputp]
+ mov edx, [rel outputsize]
+ syscall
+ cmp r15, buffsize
+ je doread
+
+ ptimerend CAL
+nomex:
+ %include "hdrs/perftimerend.ah"
+ %include "hdrs/perftimerprint.ah"
+ ptimerprint SET
+ ptimerprint LOD
+ ptimerprint CAL
+ nominal_exit
+catex:
+ catastrophic_exit
+%include "hdrs/searchCT.ah"
+c_ftr
+%include "hdrs/perftimermem.ah"
+ ptimermem SET
+ ptimermem LOD
+ ptimermem CAL
+stringcount: resb 1
+alignb 4
+inputsize: resd 1
+outputsize: resd 1
+stringfoundmask: resd 1 ; set this on possible and on actually found
+stringsignmask: resd 1 ; set for don't include if present, unset for opposite
+alignb 32
+stringstartcharmask: resb (32*4) ; dword bitmasks of found starting chars
+stringsp: resb (32*32)+32 ; extra 32 for comp. simplicity
+stringsmaskp: resb (32*32)+32 ; negative 0xff mask made just as latter stringsp gets zeroed.
+startchars: resb 32
+resb 32 ; provide an interstitial for inbuff negative overrun
+alignb 4096
+inbuff: resb buffsize
+outbuff: resb buffsize
+e_bss

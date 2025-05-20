@@ -1,0 +1,238 @@
+; Goes 
+%include "head.ah"
+%include "syscall.ah"
+%ifndef bigbuff
+%define dentsbuffsize 1024*1024
+%else
+%define dentsbuffsize 10*1024*1024
+%endif
+; if contains string
+ %ifdef docontains 
+ %define stringfind 1
+ %endif
+; if starts with string of characters (not including period if hidden)
+ %ifdef dostart 
+ %define stringfind 1
+ %endif
+c_fehdr main
+main:
+ nop
+ %include "hdrs/perftimerstart.ah"
+; Open process path for dirent analysis
+ θ=e# path θ=a# sys_open θ⊽ff syscall 
+ θ=*a [rel dentsfd] θ=ea θ=a# sys_getdents64 θ=f# dirb θ=d# dentsbuffsize syscall
+ θ=*a [rel dentstot]
+
+ %ifdef stringfind
+ pxor xmm6, xmm6; clear empty string buffer
+ vmovdqu [rel cstringb], ymm6
+
+ xor edi, edi
+ xor eax, eax
+  %ifndef dolocal
+ cmp [rsp], byte 2
+ je .singlearg
+ mov rsi, [rsp+24]
+ jmp .doublearg
+.singlearg:
+ mov rsi, [rsp+16] ; contains argument starts one qword earlier with single arg
+.doublearg:
+  %else
+ mov rsi, [rsp+16] 
+  %endif
+
+ ; copy contains string 32 byte buffer
+  %ifdef docontains
+ vmovdqu ymm0, [rsi]
+ vmovdqu [rel cstringb], ymm0
+  %endif
+  %ifdef doextension
+ vmovdqu ymm0, [rsi]
+ vmovdqu [rel cstringb+1], ymm0
+ mov [rel cstringb], byte '.'
+  %endif
+ mov rdi, cstringb
+ xor eax,eax
+ mov ecx, 32
+ repne scasb ; find end of string
+ rep stosb ; zero string after 32
+ vpcmpeqb ymm0, ymm0
+ vpcmpeqb ymm5, ymm6, [rel cstringb] ; get mask of everything after string
+ vpbroadcastb ymm4, [rel cstringb] ; get first char
+ vmovdqu ymm3, [rel cstringb]
+ vpxor ymm5, ymm0 
+; reverse the match for loadmask
+ %endif
+ ; setup vector registers
+ vpbroadcastb ymm7, byte [rel nl]
+ vpcmpeqb ymm2,ymm2
+ pxor xmm6, xmm6
+
+ %ifdef dopath ; deal with possibility of defined path not having ending slash
+ mov rax, [rel path]
+findslash: ; have to do this after contain string copy bc might overwrite in addition
+ vpcmpeqb ymm0, ymm6, [rax]
+ vpmovmskb rbx, ymm0
+ tzcnt ebx, ebx
+ jnc .el ; end was found because CF is set on a zeroed input
+ add rax, 32
+.el:
+ add rax, rbx
+ dec rax
+ cmp [rax], byte "/"
+ je .foundslash
+ mov [rax+1], word 0x002f ; "/\0"  - hex for slash and then null character in LE order
+.foundslash:
+ %endif
+  
+ ; setup filename copy
+ xor eax, eax
+ xor ebx, ebx
+ mov [rel outtot], eax
+ mov rsi, dirb
+ mov [rel dentloc], rsi
+ mov rdi, out
+
+
+; MACRO DEFINITIONS
+ %macro malmostall 0 ; For deleting "." and ".." in the name inclusion decision
+ mov edx, 0xffffff   ;  section of the main loop.
+ and edx, [rax]
+ cmp edx, 0x00002e2e
+ je skipcopy
+ and edx, 0xffff
+ cmp edx, 0x0000002e
+ je skipcopy
+ %endmacro
+
+direntloop:
+ lea rax, [rsi+19] ; get pointer to name string
+ movzx ebx, word [rsi+16]
+ add rsi, rbx ; offset current dirent pointer
+ %ifdef filesonly 
+ cmp [rax-1], byte 8
+ jne skipcopy
+ %endif
+ %ifdef dirsonly
+ cmp [rax-1], byte 4
+ jne skipcopy
+  %ifdef almostdirs ; "almostdirs" assumes dirsonly in the startLs header. 
+ mov edx, 0xffffff  ;  Chucks the "." and ".." listings.
+ and edx, [rax]
+ cmp edx, 0x00002e2e
+ je skipcopy
+ and edx, 0xffff
+ cmp edx, 0x0000002e
+ je skipcopy
+  %endif
+ %endif
+ %ifdef hiddenonly
+ cmp [rax], byte '.'
+ jne skipcopy
+ %endif
+ %ifdef monstonly
+ cmp [rax], byte '.'
+ je skipcopy
+ %endif
+
+ %ifdef stringfind
+ xor edx, edx
+ xor r9,r9
+  %ifdef doextension
+ vpmovmskb r10d, ymm5 ; find length of extension to reduce rdx from end of string
+ lzcnt r8d, r10d
+ mov r10d, 32
+ sub r10d, r8d
+  %endif
+stringfindloop: ; loop to search through 
+ vpcmpeqb ymm1, ymm6, [rax+rdx]  ; grab first null char
+  %ifdef doextension
+  ; find end of string from ymm1 and put size into r11
+ θλ↯lb θθ⋖ll ιι+ll
+ cmp r11, 32
+ je stringfindloop
+ ; generate length of extension string
+ sub rdx, r10
+ vpand ymm0, ymm5, [rax+rdx]
+ vpcmpeqb ymm0, ymm3
+ vpxor ymm0, ymm2
+ vptest ymm5, ymm0
+ jz copyloop
+ jmp skipcopy
+  %else 
+ vpcmpeqb ymm0, ymm4, [rax+rdx] ; might have characters of the string I'm looking for
+ vptest ymm0, ymm0
+ jz skipcopy; may contain skip if there is no char
+ vpmovmskb r8, ymm0
+ vpmovmskb r11, ymm1 ; find end of string
+ tzcnt r11d, r11d
+ tzcnt r8d, r8d ; get offset to first possible character
+ cmp r8, r11 ; first not found after end of string
+ jae skipcopy
+ add rdx,r8 ; offset to the next
+ vpand ymm0, ymm5, [rax+rdx] 
+ inc edx
+ vpcmpeqb ymm0,ymm3
+ vpxor ymm0, ymm2
+ vptest ymm5, ymm0 ; check that the mask is all ones
+ jz copyloop
+ jmp stringfindloop
+  %endif
+ %endif
+
+copyloop: ; read 32 bytes at a time, and replace null char with
+%ifdef dopath ; if using a version where you copy the whole path
+ ; can use r8 and rdi
+ mov r8, [rel path]
+.pathcopyloop:
+ vmovdqu ymm0, [r8]
+ vpcmpeqb ymm1, ymm6, ymm0
+ vpmovmskb rdx, ymm1
+ vmovdqu [rdi],ymm0
+ tzcnt edx, edx
+ add r8, rdx
+ add edi, edx
+ add [rel outtot], edx
+ cmp edx, 32
+ je .pathcopyloop
+%endif
+ λλ=a* [rax]
+ λζ≟bag θλ↯db θθ⋖dd ; get string length into edx
+ λλ⋀bbh λλ⋁aba λ=*a [rdi] ; 
+
+ θ+ed θ+ad θ+*d [rel outtot] ; increment pointers by string size
+ cmp edx, 32
+ je copyloop ; keep copying until a null char decreases this from 32
+ inc edi
+ add [rel outtot], dword 1
+skipcopy:
+ sub [rel dentstot], ebx
+ jg direntloop
+ ; find total
+ mov edx, [outtot]
+ ; print list
+ mov eax, sys_write
+ mov edi, eax;stdout
+ mov esi, out;[out]
+ syscall
+ %include "hdrs/perftimerend.ah"
+ %include "hdrs/perftimerprint.ah"
+ nominal_exit
+path: db "/proc/",0
+nl: db 0xa
+dirp: dq dirb
+one: db 1
+c_ftr
+ %ifdef stringfind
+ cstringp: resq 1
+ cstringb: resb 64
+ %endif
+ dentsfd: resd 1
+ dentloc: resq 1 ; location of current dirent to read filename from
+ dentstot: resd 1 ; total
+ outtot: resd 1 ; total
+ %include "hdrs/perftimermem.ah"
+ alignb 4096
+ dirb: resb dentsbuffsize
+ out: resb dentsbuffsize
+e_bss

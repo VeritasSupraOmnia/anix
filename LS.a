@@ -1,0 +1,108 @@
+%include "hdrs/setupLs.ah"
+; TODO: MEDIUM PRIORITY - Add "start of string search" that ignores hidden status and
+;                          if searches dirsonly, implies almostdirs.
+; TODO: MEDIUM PRIORITY - Add "end of string search" that does not have extension dot
+; TODO: LOW PRIORITY - Use vpgatherdd or vpgatherqd to check 8 dirents at once for 
+;                       the non-string-check dirent eliminations.
+; TODO; HIGH PRIORITY - Fix bug that does not properly check dirents with names longer
+;                        than 32 bytes
+
+ ; read each entry's name into a linebroken list
+direntloop:
+ lea rax, [rsi+19] ; get pointer to name string
+ movzx ebx, word [rsi+16]
+ add rsi, rbx ; offset current dirent pointer
+ %ifdef filesonly 
+ cmp [rax-1], byte 8
+ jne skipcopy
+ %endif
+ %ifdef dirsonly
+ cmp [rax-1], byte 4
+ jne skipcopy
+  %ifdef almostdirs ; "almostdirs" assumes dirsonly in the startLs header. 
+ mov edx, 0xffffff  ;  Chucks the "." and ".." listings.
+ and edx, [rax]
+ cmp edx, 0x00002e2e
+ je skipcopy
+ and edx, 0xffff
+ cmp edx, 0x0000002e
+ je skipcopy
+  %endif
+ %endif
+ %ifdef hiddenonly
+ cmp [rax], byte '.'
+ jne skipcopy
+ %endif
+ %ifdef monstonly
+ cmp [rax], byte '.'
+ je skipcopy
+ %endif
+
+ %ifdef stringfind
+ xor edx, edx
+ xor r9,r9
+  %ifdef doextension
+ vpmovmskb r10d, ymm5 ; find length of extension to reduce rdx from end of string
+ lzcnt r8d, r10d
+ mov r10d, 32
+ sub r10d, r8d
+  %endif
+stringfindloop: ; loop to search through 
+ vpcmpeqb ymm1, ymm6, [rax+rdx]  ; grab first null char
+  %ifdef doextension
+  ; find end of string from ymm1 and put size into r11
+ θλ↯lb θθ⋖ll ιι+ll
+ cmp r11, 32
+ je stringfindloop
+ ; generate length of extension string
+ sub rdx, r10
+ vpand ymm0, ymm5, [rax+rdx]
+ vpcmpeqb ymm0, ymm3
+ vpxor ymm0, ymm2
+ vptest ymm5, ymm0
+ jz copyloop
+ jmp skipcopy
+  %else 
+ vpcmpeqb ymm0, ymm4, [rax+rdx] ; might have characters of the string I'm looking for
+ vptest ymm0, ymm0
+ jz skipcopy; may contain skip if there is no char
+ vpmovmskb r8, ymm0
+ vpmovmskb r11, ymm1 ; find end of string
+ tzcnt r11d, r11d
+ tzcnt r8d, r8d ; get offset to first possible character
+ cmp r8, r11 ; first not found after end of string
+ jae skipcopy
+ add rdx,r8 ; offset to the next
+ vpand ymm0, ymm5, [rax+rdx] 
+ inc edx
+ vpcmpeqb ymm0,ymm3
+ vpxor ymm0, ymm2
+ vptest ymm5, ymm0 ; check that the mask is all ones
+ jz copyloop
+ jmp stringfindloop
+  %endif
+ %endif
+
+copyloop: ; read 32 bytes at a time, and replace null char with
+%ifdef dopath ; if using a version where you copy the whole path
+ ; can use r8 and rdi
+ mov r8, [rel path]
+.pathcopyloop:
+ λλ=a* [r8] λ≟bga θλ↯db λλ=*a [rdi] θ⋗dd
+ add r8, rdx
+ add edi, edx
+ add [rel outtot], edx
+ cmp edx, 32
+ je .pathcopyloop
+%endif
+ λλ=a* [rax] λζ≟bag θλ↯db θθ⋖dd ; get string length into edx
+ λλ⋀bbh λλ⋁aba λ=*a [rdi] ; 
+ θ+ed θ+ad θ+*d [rel outtot] ; increment pointers by string size
+ cmp edx, 32
+ je copyloop ; keep copying until a null char decreases this from 32
+ inc edi
+ add [rel outtot], dword 1
+skipcopy:
+ sub [rel dentstot], ebx
+ jg direntloop
+%include "hdrs/finishLs.ah"

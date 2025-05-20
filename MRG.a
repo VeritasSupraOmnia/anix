@@ -1,0 +1,124 @@
+; merge program output. Similar to cat except instead of taking files as
+; arguments, takes strings of full program invocations, then runs them in
+; sequence and, in addition to first echoing stdin into stdout, hooks up their
+; file descriptors when invoking them to print directly into merge's, i.e.
+; their parent's, stdout so there is no need for a secondary buffer.
+
+; Specifically designed for LS and it's namefile modifications which provide
+; basic line filtering, so you can then pipe multiple of these together into
+; a program like CT or TK . You can also merge the results of multiple
+; PERMs for the ultimate in shell scripting power for building software.
+%include "head.ah"
+%include "syscall.ah"
+c_fehdr main
+%define buffsize 1024*1024
+main:
+ nop
+; Read first file's output into 
+readloop:
+ xor eax, eax
+ xor edi, edi
+ mov esi, inbuf
+ mov edx, buffsize
+ syscall
+ push rax
+ mov eax, 1
+ mov edi, eax
+ mov esi, inbuf
+ mov rdx, [rsp]
+ syscall
+ pop rax
+ cmp eax, buffsize
+ je readloop
+ pxor xmm6, xmm6
+ vpcmpeqb ymm7, ymm7
+ vpbroadcastb ymm5, [rel ws]
+ pop rcx
+ mov [argc], rcx
+argprocessing:
+ add rsp, 8 ; move past this program's path
+ mov rax, [rsp] ; get target path
+ mov ebx, inbuf
+ mov [rel excargs], rbx
+ xor esi, esi ; reset inbuf offset
+ xor edx, edx
+ cmp [rax], word "./" ; if path isn't relative
+ je .noalteration
+ cmp [rax], byte "/"  ; and is not absolute, needs to be made absolute
+ je .noalteration
+ vmovdqu ymm0,[rel bin]
+ vmovdqa [inbuf],ymm0 ; copy over the absolute path template
+ mov edx, 9
+.altcpylp:
+ vmovdqu ymm0, [rax+rsi]
+ vmovdqu [inbuf+rdx+rsi],ymm0
+ vpcmpgtb ymm1, ymm0, ymm5
+ vpcmpeqb ymm0, ymm6
+ vpandn ymm2, ymm1, ymm7 ; zero or not greater than last white space char val
+; vpor ymm2,ymm0
+ vpmovmskb ebx, ymm2 ; find first instance of that last search
+ tzcnt ebx, ebx ; find the offset of that search
+ add esi, ebx
+ cmp ebx, 32 ; if that was actually found, stop copying
+ je .altcpylp
+ mov [inbuf+rdx+rsi], byte 0
+ add rsi, 1
+.noalteration:
+ vpmovmskb ecx, ymm0 ; zero mask, not whitespace mask includes this
+ tzcnt ecx, ecx
+ cmp ebx, ecx
+ je endarghandle ; found zero during whitespace
+ mov edi, 8 ; index into arg string
+argcpylp:
+ lea rbx, [inbuf+rdx+rsi]
+ mov [excargs+rdi], rbx
+.slp: ; assume single spaces between each argument
+ vmovdqu ymm0, [rax+rsi] ; might add escape chars later
+ vmovdqu [inbuf+rdx+rsi],ymm0
+ vpcmpeqb ymm1, ymm0, ymm6
+ vpcmpgtb ymm0, ymm0, ymm5
+ vpandn ymm0, ymm0, ymm7 
+ vpmovmskb ebx, ymm0 
+ tzcnt ebx, ebx 
+ add esi, ebx
+ cmp ebx, 32 
+ je .slp
+ mov [inbuf+rdx+rsi], byte 0
+ add esi, 1
+ vpmovmskb ecx, ymm1 ; find first instance of that last search
+ tzcnt ecx, ecx ; find the offset of that search
+ add rdi, 8
+ cmp ebx, ecx
+ je endarghandle
+ jmp argcpylp
+endarghandle:
+ mov [excargs+rdi], dword 0
+; mov [tstack], dword  doexec
+; jmp nomex
+; call dothread
+;dothread:
+; mov eax, sys_clone
+; mov edi, clone_files
+; mov esi, tstack
+; xor edx, edx
+; syscall
+; ret
+
+doexec:
+ mov rdi, [rel excargs]
+ mov rsi, excargs
+ mov eax, sys_exec
+ xor edx, edx
+ syscall
+nomex:
+ nominal_group_exit
+ws: db 0x20
+bin: db "/usr/bin/",0 ; for execv path
+c_ftr
+alignb 32
+excargs: resq 128
+tstack: resq 1
+argc: resq 1
+alignb 4096
+inbuf: resb buffsize
+e_bss

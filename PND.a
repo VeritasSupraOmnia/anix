@@ -1,0 +1,252 @@
+; PND - Prepend and append strings to lines, allows prepending to filenames after
+;         paths and appending before their extensions in addition to basic function
+;        Maybe also takes hex indexes off beginning or end, or to append/prepend to
+;         specific found substrings within the line.
+%include "head.ah"
+%include "syscall.ah"
+%include "sectalloc.ah"
+%ifdef posthidden
+%define atfilename
+%endif
+%ifdef atextension
+%define atdot
+%endif
+%ifdef atdot
+%define atfilename
+%endif
+
+; TODO: HIGH PRIORITY - Add enumeration of lines.
+; TODO: MEDIUM PRIORITY - Add optional numeric formatting (num of zeroes and 
+;                          hex or decimal representations).
+; TODO: LOW PRIORITY - Add optional "postfix" and "prefix" strings to the
+;                        numeric representations.
+
+c_fehdr main
+main:
+ nop
+%include "hdrs/perftimerstart.ah"
+ ; don't run if no arguments
+ cmp [rsp], dword 2
+ pxor xmm6, xmm6
+ vpbroadcastb ymm7, [rel nl]
+ jl catex
+ ; grab pendstring
+ mov rsi,[rsp+16]
+ vpcmpeqb ymm0, ymm6, [rsi]
+ vmovdqu [rel pendstring], ymm6
+ vpmovmskb rcx, ymm0
+ tzcnt ecx, ecx
+ mov edi, pendstring
+ rep movsb
+
+ ; Setup salloc for output buffer control
+ xor eax, eax
+ xor edi, edi
+ mov r15, .ret
+ jmp sallocbumpinit
+.ret:
+ mov [rel allocp], eax
+ mov r14, rax
+ xor r13, r13
+ ; Read until nothing else on stdin, bump growing alloc as it goes
+ mov r15d, readin ; Loops back to readin on sallocbumpgrow's tail jump
+ mov r12d, readinexit
+readin:
+ xor eax, eax
+ xor edi, edi
+ lea rsi, [r13+r14]
+ mov edx, (1024*1024)
+ syscall
+ cmp rax, (1024*1024)
+ cmovne r15, r12
+ add r13, rax
+; mov rbx, rax
+ mov rax, [rel allocp]
+ xor edi, edi
+ jmp sallocbumpgrow
+readinexit:
+ add r14, r13
+ mov [r14], word 0x0 ; nullterm the end of the input always
+ add r14, 2
+ mov [rel outp], r14
+ mov [rel inbytes], r13
+
+ ; handle counters - need to be high regs for no scratching
+ xor r13, r13 ; input
+ xor r14, r14 ; input
+ mov rdi, [rel outp]
+ mov rsi, [rel allocp]
+ ; do different checking depending on version, never compiled without one of these
+ ;  many flags so no chance of "unhandled default" without build define error
+ vmovdqu ymm5, [rel pendstring]
+ ; save size of pendstring
+ vpcmpeqb ymm1, ymm6, ymm5
+ vpmovmskb rax, ymm1
+ tzcnt eax, eax
+ mov [rel pendstringsize], rax
+
+
+; DIVERGENT SETUP
+%ifdef atend ; after every string
+%elifdef atstart ; very basic, just insert before each string
+%elifdef atdot ; after filename and dot but before extension text
+ vpbroadcastb ymm4, [rel dot]
+%else
+ vpbroadcastb ymm4, [rel slash]
+%endif
+
+%macro mcopypstr 0 ; handles the copying of the pend string into output
+ vmovdqu [rdi+r14], ymm5
+ add r14, [rel pendstringsize]
+%endmacro
+
+%macro mfindend 0 ; finds the end offset of input string and puts it into r12
+xor r12, r12
+lea rbx, [r13+rsi] ; also load this specific string pointer into rbx
+findend:
+ vmovdqu ymm0, [rbx+r12]
+ vpcmpeqb ymm1, ymm6, ymm0 
+ vpcmpeqb ymm2, ymm7, ymm0
+ vpor ymm1, ymm2
+ vpmovmskb rax, ymm1
+ tzcnt eax, eax
+ add r12, rax
+ cmp eax, 32
+ je findend
+%endmacro
+
+%macro mbacksearch 0 ; Once at the end offset, grabs the index of the first index
+ mfindend            ;  left of the end that contains the broadcasted byte in ymm4
+ mov rcx, r12
+.backsearch:
+ sub rcx, 32
+ vmovdqu ymm0, [rbx+rcx]
+ vpcmpeqb ymm1, ymm4, ymm0
+ vpcmpeqb ymm0, ymm6, ymm0
+ vpcmpeqb ymm2, ymm7, ymm0
+ vpor ymm1, ymm2
+ vpor ymm0, ymm1
+ vptest ymm0, ymm0
+ jz .backsearch
+ vpmovmskb eax, ymm0
+ lzcnt eax, eax
+ add ecx, 32
+ sub rcx, rax ; output on rcx as retation to end
+%endmacro
+
+; DIVERGENT ACTION
+bigloop: ; big loop - all version reference this
+%ifdef atend ; after every string
+sl: ; small loop
+ vmovdqu ymm0, [rsi+r13]
+ vpcmpeqb ymm1, ymm6, ymm0 ; works with both lines and nullterm strings
+ vpcmpeqb ymm2, ymm7, ymm0
+ vmovdqu [rdi+r14], ymm0
+ vpor ymm1, ymm2
+ vpmovmskb rax, ymm1
+ tzcnt eax, eax
+ add r13, rax
+ add r14, rax
+ cmp eax, 32
+ je sl
+ mcopypstr
+ mov [rdi+r14], byte 0xa
+ inc r14
+ inc r13
+ cmp r13, [rel inbytes] ; exit when done
+ jge el
+ jmp bigloop
+%elifdef atfilename ; after path but before filename
+ mbacksearch
+%ifdef posthidden ; after path AND starting hider dot but before filename
+ cmp [rbx+rcx], byte "."
+ jne .nodot
+ inc rcx
+.nodot:
+%elifdef atextension ; extension but after dot
+ dec rcx
+%endif
+ xor eax, eax
+ lea rdx, [r14+rdi]
+ cmp ecx, 0
+ jle .insert ; if it's at the start of the string, just insert the copy string.
+.fcopy: ; first
+ vmovdqu ymm0, [rbx+rax]
+ vmovdqu [rdx+rax], ymm0
+ add eax, 32
+ cmp eax, ecx
+ jl .fcopy
+ mov rax, rcx
+.insert:
+ vmovdqu [rdx+rax], ymm5
+ add r14, [rel pendstringsize]
+ je .escopy
+ lea rdx, [r14+rdi] ; need to reload because r14 has changed
+.scopy: ; second
+ vmovdqu ymm0, [rbx+rax]
+ vmovdqu [rdx+rax], ymm0
+ add eax, 32
+ cmp rax, r12
+ jl .scopy
+.escopy: 
+ add r13, r12 ; add line string size to both
+ add r14, r12
+ mov [rdi+r14], byte 0xa
+ inc r13
+ inc r14
+ cmp r13, [rel inbytes] ; exit when done
+ jge el
+ jmp bigloop
+%ifdef atdot
+dot: db "."
+%else
+slash: db "/"
+%endif
+%elifdef atstart ; very basic, just insert before each string
+ mcopypstr
+sl:
+ vmovdqu ymm0, [rsi+r13]
+ vpcmpeqb ymm1, ymm6, ymm0 ; works with both lines and nullterm strings
+ vpcmpeqb ymm2, ymm7, ymm0
+ vmovdqu [rdi+r14], ymm0
+ vpor ymm1, ymm2
+ vpmovmskb rax, ymm1
+ tzcnt eax, eax
+ add r13, rax
+ add r14, rax
+ cmp eax, 32
+ je sl
+ mov [rdi+r14], byte 0xa
+ inc r13
+ inc r14
+ cmp r13, [rel inbytes] ; exit when done
+ jge el
+ jmp bigloop
+%endif
+el: ; exit loop
+dowrite:
+ mov eax, 1
+ mov edi, eax
+ mov esi, [rel outp]
+ mov rdx, r14
+ syscall
+
+nomex:
+%include "hdrs/perftimerend.ah"
+ nominal_exit
+catex:
+ catastrophic_exit
+ msallocbumpinit
+ align 64
+ msallocbumpgrow
+exitafer: db 0
+nl: db 0xa
+c_ftr
+ %include "hdrs/perftimermem.ah"
+alignb 32
+pendstring: resb 32
+pendstringsize: resq 1
+inbytes: resq 1
+allocp: resq 1
+outp: resq 1
+e_bss 

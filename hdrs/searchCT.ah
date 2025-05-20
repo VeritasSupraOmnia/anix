@@ -1,0 +1,436 @@
+ db 0 
+ dd 0 ; ensure 5 bytes above search for space to give return rel address
+ align 64
+search:
+; searches through a whole buffer at a time with different algo based on what is most
+;  efficient for the count of strings given
+;align 64
+search1: 
+ ; need to do extra init 
+%ifdef searchstart
+ vmovdqu ymm4, [stringsp]
+ vmovdqu ymm3, [stringsmaskp]
+ %ifdef searchend
+  %define searchstartend
+ %endif
+%else
+ vpbroadcastb ymm4, [startchars]
+%endif
+%ifdef caseinsensitive
+ vpbroadcastb ymm8, [sitty]
+ vpbroadcastb ymm9, [sevay]
+ vpbroadcastb ymm10, [twnty]
+%endif
+esearch1setup:
+.blp: ; string by string
+ mov [stringfoundmask], byte 0 ; assume did not find it until you do
+%ifdef searchstart ; only first string gets start search, but only one string
+ vpandn ymm0, ymm3, [r13+rsi]
+ %ifdef caseinsensitive
+ vpcmpgtb ymm1, ymm0, ymm8
+ vpcmpgtb ymm2, ymm0, ymm9
+ vpandn ymm1, ymm2, ymm1
+ vpand ymm1, ymm1, ymm10
+ vpsubb ymm0, ymm0, ymm1
+ %endif
+ vpcmpeqb ymm0, ymm4
+ vptest ymm0, ymm7
+ jnc endsearch1
+ mov [stringfoundmask], byte 1
+%elifdef searchend
+ xor ecx, ecx
+.slp: 
+%else ; no search limiting
+ xor ecx, ecx ; location in string
+lea rbx, [r13+rsi]
+.slp: ; through chars
+ vmovdqu ymm0, [rbx+rcx]
+ %ifdef caseinsensitive
+ vpcmpgtb ymm1, ymm0, ymm8
+ vpcmpgtb ymm2, ymm0, ymm9
+ vpandn ymm1, ymm2, ymm1
+ vpand ymm1, ymm1, ymm10
+ vpsubb ymm0, ymm0, ymm1
+ %endif
+ vpcmpeqb ymm1, ymm5, ymm0 ; find end of string if obvervable
+ vpcmpeqb ymm2, ymm6, ymm0 ; check both newline and null char
+ vpcmpeqb ymm3, ymm4, ymm0 ; also check for if the wanted char is here
+ vpor ymm1, ymm2
+ vpmovmskb edx,  ymm1
+ vpmovmskb eax,  ymm3
+ tzcnt edx, edx
+ tzcnt eax, eax
+ cmp eax, edx
+ mov r8, rdx
+ cmovl r8, rax
+ add rcx, r8
+ cmp eax, edx
+ jl .mayfound
+ cmp edx, 32
+ je .slp
+ mov [stringfoundmask], dword 0
+ jmp .copy
+.mayfound:
+ ; only need to check one string so no big loop over each check is needed
+ ; just check for this string and then move on to next byte of input
+ vmovdqu ymm1, [stringsmaskp]
+ vpandn ymm0, ymm1, [rbx+rcx] ; get only the length of string to check
+ %ifdef caseinsensitive
+ vpcmpgtb ymm1, ymm0, ymm8
+ vpcmpgtb ymm2, ymm0, ymm9
+ vpandn ymm1, ymm2, ymm1
+ vpand ymm1, ymm1, ymm10
+ vpsubb ymm0, ymm0, ymm1
+ %endif
+ vpcmpeqb ymm0, ymm0, [stringsp]
+ inc ecx
+ vptest ymm0, ymm7
+ jc .found ; match not found so increment ecx and leave
+ jmp .slp
+.found:
+ or [stringfoundmask], byte 1 ; if found then
+.copy:
+%endif
+endsearch1:
+
+;align 64
+search2: 
+%ifndef searchstartend
+ %ifdef searchstart
+ vpbroadcastb ymm8, [startchars+1]
+ %elifdef searchend
+ vpmovmskb r11d, [stringsmaskp]
+ tzcnt r11d, r11d
+ vpbroadcastb ymm8, [startchars+1]
+ %else
+ vpbroadcastb ymm4, [startchars]
+ vpbroadcastb ymm8, [startchars+1]
+ %endif
+%else
+ vpmovmskb r11d, [stringsmaskp+32]
+ tzcnt r11d, r11d
+%endif
+%ifdef caseinsensitive
+ vpbroadcastb ymm12, [sevay]
+%endif
+ vmovdqu ymm9, [stringsmaskp]
+ vmovdqu ymm10, [stringsmaskp+32]
+ xor r9, r9
+esearch2setup:
+.blp: ; string by string
+ mov [stringfoundmask], dword 0 ; assume did not find it until you do
+ xor ecx, ecx ; location in string
+ lea rbx, [r13+rsi]
+%ifdef searchstart
+ vpandn ymm0, ymm9, [rbx]
+ vpcmpeqb ymm0, [stringsp]
+ vptest ymm0, ymm7
+ jnc .nostartfound
+ or [stringfoundmask], byte 1
+.nostartfound:
+%endif
+%ifdef searchstartend
+%elifdef searchend
+%endif
+%ifndef searchstartend
+.slp: ; through chars
+ vmovdqu ymm0, [rbx+rcx]
+ %ifdef caseinsensitive
+ vpbroadcastb ymm11, [sitty]
+ vpcmpgtb ymm1, ymm11, ymm0
+ vpcmpgtb ymm2, ymm12, ymm0
+ vpbroadcastb ymm11, [twnty]
+ vpandn ymm1, ymm2, ymm1
+ vpand ymm1, ymm1, ymm11
+ vpsubb ymm0, ymm0, ymm1
+ %endif
+ vpcmpeqb ymm1, ymm5, ymm0 ; find end of string if obvervable
+ vpcmpeqb ymm2, ymm6, ymm0 ; check both newline and null char
+ vpor ymm1, ymm2
+ %ifdef halfendsearch
+ vpcmpeqb ymm3, ymm4, ymm0 ; also check for if the wanted chars are here
+ %endif
+ vpmovmskb edx,  ymm1
+ vpcmpeqb ymm2, ymm8, ymm0 
+ vpor ymm2, ymm2, ymm3 ; or together start chars found
+ vpmovmskb eax,  ymm2 
+ tzcnt edx, edx
+ tzcnt eax, eax
+ cmp eax, edx
+ mov r8, rdx
+ cmovl r8, rax
+ add rcx, r8
+ cmp eax, edx
+ jl .mayfound
+ cmp edx, 32
+ jne .copy
+ jmp .slp
+.mayfound:
+ ; only need to check 2 chars so just check for both at once
+ %ifdef caseinsensitive
+ vmovdqu ymm0, [rbx+rcx]
+ vpbroadcastb ymm11, [sitty]
+ vpcmpgtb ymm1, ymm11, ymm0
+ vpcmpgtb ymm2, ymm12, ymm0
+ vpbroadcastb ymm11, [twnty]
+ vpandn ymm1, ymm2, ymm1
+ vpand ymm1, ymm1, ymm11
+ vpsubb ymm4, ymm0, ymm1
+ %endif
+ %ifndef halfendsearch
+ vpandn ymm0, ymm9, ymm4
+ %endif
+ vpandn ymm3, ymm10, ymm4
+ %ifndef halfendsearch
+ vpandn ymm0, ymm9, [rbx+rcx] 
+ %endif
+ vpandn ymm3, ymm10, [rbx+rcx] 
+ %ifndef halfendsearch
+ vpcmpeqb ymm0, ymm0, [stringsp]
+ %endif
+ vpcmpeqb ymm3, ymm3, [stringsp+32]
+ xor eax, eax
+ vptest ymm3, ymm7
+ adcx eax, r9d
+ shl eax, 1
+ vptest ymm0, ymm7
+ adcx eax, r9d
+ inc ecx
+ or [stringfoundmask], eax 
+ %ifdef andcombine
+ and eax, [stringsignmask]
+ jz .slp
+ add esi, ecx 
+ %elifdef orcombine
+ xor eax, [stringsignmask] ; just one is required
+ jnz .copy
+ jmp .slp
+ %elifdef xorcombine
+ and eax, [stringsignmask]
+ jz .slp
+ add esi, ecx 
+ %endif
+.copy:
+%endif
+endsearch2:
+
+;align 64
+search4: 
+ vpbroadcastb ymm8, [startchars]
+ vpbroadcastb ymm9, [startchars+1]
+ vpbroadcastb ymm10, [startchars+2]
+ vpbroadcastb ymm11, [startchars+3]
+ xor r9, r9
+ cmp [stringcount], byte 3
+ jg esearch4setup
+ vmovdqu [stringsmaskp+96], ymm7
+ vmovdqu [stringsp+96], ymm7
+ vmovdqu ymm11, ymm7
+esearch4setup:
+.blp: ; string by string
+ mov [stringfoundmask], dword 0 ; assume did not find it until you do
+ xor ecx, ecx ; location in string
+lea rbx, [r13+rsi]
+.slp: ; through chars
+ vmovdqu ymm0, [rbx+rcx]
+ %ifdef caseinsensitive
+ vpbroadcastb ymm3, [sitty]
+ vpcmpgtb ymm1, ymm3, ymm0
+ vpbroadcastb ymm4, [sevay]
+ vpcmpgtb ymm2, ymm4, ymm0
+ vpbroadcastb ymm3, [twnty]
+ vpandn ymm1, ymm2, ymm1
+ vpand ymm1, ymm1, ymm3
+ vpsubb ymm0, ymm0, ymm1
+ %endif
+ vpcmpeqb ymm1, ymm5, ymm0 ; find end of string if obvervable
+ vpcmpeqb ymm2, ymm6, ymm0 ; check both newline and null char
+ vpor ymm1, ymm2
+ vpcmpeqb ymm3, ymm8, ymm0 ; also check for if the wanted chars are here
+ vpcmpeqb ymm2, ymm9, ymm0 
+ vpcmpeqb ymm4, ymm10, ymm0 
+ vpor ymm2, ymm2, ymm3 ; or together start chars found
+ vpor ymm3, ymm2, ymm4
+ vpcmpeqb ymm4, ymm11, ymm0 
+ vpor ymm2, ymm3, ymm4
+ vpmovmskb edx, ymm1
+ vpmovmskb eax, ymm2 
+ tzcnt edx, edx
+ tzcnt eax, eax
+ cmp eax, edx
+ mov r8, rdx
+ cmovl r8, rax
+ add rcx, r8
+ cmp eax, edx
+ jl .mayfound
+ cmp edx, 32
+ jne .copy
+ jmp .slp
+.mayfound:
+ ; only need to check 4 chars so just all at once
+ vmovdqu ymm4, [rbx+rcx]
+ %ifdef caseinsensitive
+ vpbroadcastb ymm3, [sitty]
+ vpcmpgtb ymm1, ymm3, ymm4
+ vpbroadcastb ymm4, [sevay]
+ vpcmpgtb ymm2, ymm4, ymm4
+ vpbroadcastb ymm3, [twnty]
+ vpandn ymm1, ymm2, ymm1
+ vpand ymm1, ymm1, ymm3
+ vpsubb ymm4, ymm4, ymm1
+ %endif
+ vmovdqu ymm0, [stringsmaskp]
+ vmovdqu ymm1, [stringsmaskp+32]
+ vmovdqu ymm2, [stringsmaskp+64]
+ vmovdqu ymm3, [stringsmaskp+96]
+ vpandn ymm0, ymm0, ymm4
+ vpandn ymm1, ymm1, ymm4
+ vpandn ymm2, ymm2, ymm4
+ vpandn ymm3, ymm3, ymm4
+ vpcmpeqb ymm0, ymm0, [stringsp]
+ vpcmpeqb ymm1, ymm1, [stringsp+32]
+ vpcmpeqb ymm2, ymm2, [stringsp+64]
+ vpcmpeqb ymm3, ymm3, [stringsp+96]
+ xor eax, eax
+ vptest ymm3, ymm7
+ adcx eax, r9d
+ shl eax, 1
+ vptest ymm2, ymm7
+ adcx eax, r9d
+ shl eax, 1
+ vptest ymm1, ymm7
+ adcx eax, r9d
+ shl eax, 1
+ vptest ymm0, ymm7
+ adcx eax, r9d
+ inc ecx
+ or [stringfoundmask], eax 
+ %ifdef andcombine
+ and eax, [stringsignmask]
+ jz .slp
+ add esi, ecx 
+ %elifdef orcombine
+ xor eax, [stringsignmask] ; just one is required
+ jnz .copy
+ jmp .slp
+ %elifdef xorcombine
+ and eax, [stringsignmask]
+ jz .slp
+ add esi, ecx 
+ %endif
+.copy:
+endsearch4:
+
+;align 64
+search8: 
+esearch8setup:
+.blp: ; string by string
+.slp: ; through chars
+endsearch8:
+
+;align 64
+search16: 
+;align 64
+esearch16setup:
+endsearch16:
+
+;align 64
+search32: 
+;align 64
+esearch32setup:
+endsearch32: 
+
+;align 128 ; for better search copy loop - can do two copies per loop
+copydecision: ; decide whether to copy string or not based on which are found in this string
+ %ifdef andcombine ; default is AND combination
+ movzx edx, byte [stringcount]  
+ mov ecx, 0xffffffff
+ mov eax, [stringfoundmask]
+ mov ebx, [stringsignmask]  
+ shlx ecx, ecx, edx ; get inverse mask of strings searched for
+ mov edx, eax
+ and eax, ebx
+ jnz .skipstring
+ not ebx
+ andn ebx, ecx, ebx ; filter off the ending bullshit from the not
+ and edx, ebx
+ cmp edx, ebx ; if no required strings are missing, then copy
+ je .copy ; otherwise can't fullfill the AND operation so if so then skip
+ %elifdef orcombine ; OR combination
+ mov eax, [stringfoundmask]
+ mov ebx, [stringsignmask]  
+ xor eax, ebx
+ jnz .copy
+ %elifdef xorcombine ; same as OR but skip if negative strings were found
+ mov eax, [stringfoundmask]
+ mov ebx, [stringsignmask]  
+ mov ecx, eax
+ and ecx, ebx
+ jnz .skipstring 
+ or eax, ebx
+ xor eax, ebx
+ jnz .copy
+ %endif
+.skipstring:
+ vmovdqu ymm0, [r13+rsi]
+ vpcmpeqb ymm1, ymm6, ymm0
+ vpcmpeqb ymm2, ymm5, ymm0
+ vpor ymm1, ymm2
+ vpmovmskb rax, ymm1
+ tzcnt eax, eax
+ add rsi, rax
+ cmp eax, 32
+ je .skipstring
+ jmp .cleanup
+.copy:
+ vmovdqu ymm0, [r13+rsi]
+ vmovdqu [r14+rdi], ymm0 ; overrun is fine as long as 
+ vpcmpeqb ymm1, ymm6, ymm0
+ vpcmpeqb ymm2, ymm5, ymm0
+ vpor ymm1, ymm2
+ vpmovmskb rax, ymm1
+ tzcnt eax, eax
+ add rsi, rax
+ add rdi, rax
+ cmp eax, 32
+ je .copy
+ mov [r14+rdi], byte 0xa
+ inc rdi
+ mov [outputsize], edi
+.cleanup:
+ inc rsi
+ cmp esi, [inputsize] ; if run out of input, print
+ jl .copyjumpback
+db 0xe9	      ;  jump to offset
+dd 0
+.copyjumpback: ; relative jump back to the search string which is overwitten
+db 0xe9	      ;  based on which search function is actually used.
+dd 0
+endcopydecision:
+msallocbumpinit
+msallocbumpgrow
+searchfunctable:
+ dd search1
+ dw endsearch1-search1
+ dw esearch1setup-search1
+ dd search2
+ dw endsearch2-search2
+ dw esearch2setup-search2
+ dd search4
+ dw endsearch4-search4
+ dw esearch4setup-search4
+ dd search8
+ dw endsearch8-search8
+ dw esearch8setup-search8
+ dd search16
+ dw endsearch16-search16
+ dw esearch16setup-search16
+ dd search32
+ dw endsearch32-search32
+ dw esearch32setup-search32
+nl: db 0xa
+%ifdef caseinsensitive
+sitty: db 0x60
+sevay: db 0x7a
+twnty: db 0x20
+%endif

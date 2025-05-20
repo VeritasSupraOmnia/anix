@@ -1,0 +1,341 @@
+; Generate all possible given permutations of given comma-separated lists of 
+;  possibilities, using a shell-friendly syntax.
+; Useful for generating names and flags for conditional compilation/assembly for
+;  bytecode-baked variations of the same program, allowing many more, smaller programs
+;  that are more specialized without losing the mnemonic of the main program.
+
+; PERM "nasm @0:0 @1:0 @2:0 ./LS.a ./bin/@1:1@2:1LS@0:1" 0:0=,-Dperftest 1:0=-Dfilesonly,-Ddirsonly  2:0=,-Dhiddenonly,-Dmonstonly 0:1=,t 1:1=,f,d 2:1=,h,d
+
+; The above demonstrates the basic syntax of PERM on the command line.
+; The first argument after the invokation is the template string. This string does
+;  define the wrapper around the permutations, variants, so as to place them within
+;  each final string.
+
+; The @ symbol tells PERM to index into the slot buffer and generate permutations to
+;  it, with the numbers directly after each @ symbol indexing specific slots and
+;  substrings of those slots, with the first number being the slot and the second
+;  being the substring. The number pair is always separated by a colon and nothing
+;  else so can be a hex value but always of a single digit to avoid confusion with the
+;  rest of the string. This value indexes directly into a flat buffer that stores
+;  substrings, so if you screw this up and address the wrong slot and substring that
+;  doesn't exist, you will just output nothing in that slot.
+
+; Each successive argument string defines a comma separated list of strings.
+%include "head.ah"
+%include "syscall.ah"
+%include "sectalloc.ah"
+c_fehdr main
+main:
+nop
+ %include "hdrs/perftimerstart.ah"
+
+ cmp [rsp], dword 2
+ jl noargs ; needs both a template and replacement arguments
+ je lowargs   ; only template arg
+ mov r14, [rsp] ; save argc
+
+ ; calculate and generate template string data, template partition list and
+ ; per-partition variant and sub-variant target lists
+ vpbroadcastb ymm7, [rel atsym] ; for finding next insertion slot
+ vpbroadcastb xmm5, [rel threenine] ; data masks for calculating binary data from hex
+ vpbroadcastb xmm4, [rel seven]
+ vpbroadcastb xmm3, [rel fext]
+ pxor xmm6, xmm6 ; for finding the end of the nulterm
+ xor ecx, ecx 
+ xor edx, edx 
+ xor r13, r13 ; indexing into template string partition index array
+ lea r12, [rsp+16] ; each argument after count and program name iterated by r12
+ mov rsi, [r12] ; use rsi now for this bc setup is safer than straight stack approach
+templateparse: ; copy into the tstring data
+ xor edi, edi 
+ vmovdqu ymm2, [rsi+rdx]
+ vpcmpeqb ymm0, ymm6, ymm2
+ vpcmpeqb ymm1, ymm7, ymm2
+ vpmovmskb rax, ymm0
+ vpmovmskb r11, ymm1
+ mov r10, r11
+ or r10, rax
+ tzcnt r10, r10 ; count till next section, or till end of string, or 32 bytes of head
+ shrx rax, rax, r10
+ shrx r11, r11, r10
+ vmovdqu [templatestring+rcx], ymm2
+ add rcx, r10 ; move read and write head past this section that has been scanned
+ add rdx, r10
+ add rdi, r10
+ mov [rel partitioncount], r13b ; save new count of partitions
+ and eax, 1 ; end of template string
+ jnz variantargs ; go to handling the other arguments
+ and r11, 1
+ jz templateparse ; loop if not end of string partition, but of 32 byte chunk
+
+ ; handle slot and generate partition data
+ mov [r13+tstringpartitions], cl ; save partition edge location
+ ; translate slot and substring insertion hex indexes into actual binary numbers
+ mov edi, [rsi+rdx]
+ movd xmm0, edi
+ vpcmpgtb xmm1, xmm0, xmm5 ; find letters in hex
+ vpand xmm1, xmm4
+ vpsubb xmm0, xmm1 ; normalize letters to proper binary
+ vpand xmm0, xmm3 ; remove ascii bits from value
+ movd edi, xmm0 ; slot and substring in first and second words of the dword
+ shr edi, 8 ; first byte is @, second is :
+
+ ; save data you just decoded from hex
+ mov [r13+tstringvariants], dil
+ shr edi, 16
+ mov [r13+tstringvariantsubstrings], dil
+ inc r13 ; new partition
+ add edx, 4 ; insertion syntax requires exactly 4 bytes, so skip past copying them
+ jmp templateparse
+
+; setup for variant handling
+variantargs:
+ ; variant definition loop initialization
+ dec r14
+ vpbroadcastb ymm7, [rel comma]
+ mov [rel slotcount], byte 0 
+; deal with variant definitions
+bigvariantloop:
+ dec r14
+ jz argsdone ; zero if arguments expended, decs before first to clear name and tstring
+ add r12, 8 ; new argument
+ mov rsi, [r12] ; new argument pointer
+
+ ; grab indexes for definition of substring at specific slot
+ mov edi, [rsi]
+ movd xmm0, edi
+ vpcmpgtb xmm1, xmm0, xmm5 ; find letters in hex
+ vpand xmm1, xmm4
+ vpsubb xmm0, xmm1 ; normalize letters to proper binary
+ vpand xmm0, xmm3 ; remove ascii bits from value
+ movd edi, xmm0 
+
+ ; generate indexes without the chaff, via shifting and anding
+ mov r8, rdi
+ shr r8, 16
+ and r8, 0xff
+ and rdi, 0xff
+
+ cmp rdi, 15
+ jge slotoutofbounds
+ cmp r8, 15
+ jge substringoutofbounds
+
+ ; for indexing into variant counter
+ mov r15, rdi
+ ; take only the maximum number of slots
+ cmp [rel slotcount], dil 
+ ja .noupdate
+ mov [rel slotcount], dil
+ .noupdate:
+ ; count variants
+ xor ebx,ebx
+
+ ; CHANGE TO 8 variants per slot
+
+ ; generate target pointer offset from the indexes
+ shl rdi, (5+4+3) ; 32*16*8 - slot
+ shl r8, (5+3) ; 32*8 - substring
+ lea r9, [rdi+r8+substrings]
+ add rsi, 4 ; skip hex as well as : and = symbols
+ xor edx, edx
+ xor r13,r13 ; index into substring variants
+variantloop:; grabs each comma separated variant and properly copies them to the array
+ vmovdqu ymm0, [rsi+rdx]
+ vpcmpeqb ymm1, ymm0, ymm7
+ vpcmpeqb ymm2, ymm0, ymm6
+ vpmovmskb rax, ymm2 ; need both to determine if end of arg or just at comma
+ vpmovmskb r11, ymm1
+ vpandn ymm0, ymm1, ymm0 ; nullify the comma if there is one before copy
+ mov r10,r11
+ or r10,rax
+ tzcnt r10, r10 ; find the size of the current substring to move the read head
+ ; move the string to the proper location 
+ vmovdqu [r9+r13],ymm0
+ ; deal with looping conditions
+ inc ebx ; count the ways
+ cmp ebx, 8 ; max 8 variants for each slot
+ jge variantsdone
+ add r13, 32
+ shrx rax, rax, r10
+ and rax, 1 ; check is not end of argument nullterm string
+ jnz variantsdone
+ ; move the read head now it's known that it isn't the end of the loop
+ inc r10 ; move past the comma, too
+ add rdx, r10
+ jmp variantloop
+variantsdone:
+ ; Maximize the given count so that you don't have to count commas to add nulls to 
+ ;  the end of substring definitions that are all nulls anyway, only to the start of
+ ;  them to keep accurate indexing.
+ cmp bl, [r15+slotvariantcounts]
+ jle .donotcopy
+ mov [r15+slotvariantcounts], bl
+ .donotcopy:
+ jmp bigvariantloop
+argsdone:
+ ; normalize to actual count, not just highest slot index.
+ add [rel slotcount], byte 1
+ ; calculate the count of permutations by multiplying the counts together.
+permcount:
+ movzx ecx, byte [rel slotcount]
+ cmp ecx, 1
+ jle .exloop
+ movzx eax, byte [rel slotvariantcounts]
+ mov ebx, 1
+.calcloop:
+ mov rdx, rax
+ movzx eax, byte [slotvariantcounts+rbx]
+ add ebx, 1
+ cmp eax, 0
+ je .exloop;badslot
+ mul rdx ; new multiple iteration
+ loop .calcloop ; keeps going until each permutation count is multiplied into total
+.exloop:
+ mov [rel combisleft], rdx ; save count of iterations left
+
+ ; actually calculate all the permutations and print
+ pxor xmm6, xmm6
+ movdqu [rel tempindexes], xmm6
+permcalc:
+ ; clear temp counts
+ mov r14, [rel combisleft]
+ xor edi, edi ; output bytes
+; large loop for dealing with the organization of printing
+permloop:
+; smaller loop for dealing with generating one string at a time
+stringcopy:
+ xor edx, edx ; partition index
+ xor r8,r8 ; last partition 
+stringloop:
+ movzx ebx, byte [tstringpartitions+rdx]
+ mov rsi, r8 ; load last partition as new starting point
+ mov rcx, rbx
+ sub rcx, r8
+ ; first copy the section of template string before the partition
+.tstringloop:
+ vmovdqu ymm0, [templatestring+rsi]
+ vmovdqu [outbuff+rdi], ymm0
+ add esi, 32
+ add edi, 32
+ sub ecx, 32
+ jg .tstringloop
+ mov r8, rbx ; save current partition to last partition
+ ; fix rdi of the likely overflow
+ sub rsi, rbx
+ sub rdi, rsi
+ ; now calculate and copy the substring of the partition, max 32 bytes
+.copysubstring:
+ ; calculate correct substring offset
+ movzx eax, byte [rdx+tstringvariants]
+ movzx ebx, byte [rdx+tstringvariantsubstrings]
+ movzx ecx, byte [rax+tempindexes]
+ shl eax, 5+4+3 ; slot
+ shl ebx, 5+3 ; substring
+ shl ecx, 5 ; variant of substring
+ add rax, rcx
+ add rax, rbx
+ 
+ ; copy substring to output
+ vmovdqu ymm0, [rax+substrings]
+ vmovdqu [rdi+outbuff], ymm0
+ vpcmpeqb ymm0, ymm6
+ vpmovmskb ebx, ymm0
+ tzcnt eax, ebx
+ add rdi, rax ; update write head
+ add edx, 1 ; index next partition
+ ; loop or exit if done with all permutations
+ cmp dl, byte [rel partitioncount]
+ jl stringloop
+ ; add newline to end
+ mov [rdi+outbuff], byte 0xa
+ inc rdi
+ mov [rel outputfill], rdi 
+ ; update temp variant indexes for the next permutation
+ mov ecx, 16
+ mov eax, 1
+ mov edi, tempindexes
+ mov esi, slotvariantcounts
+.updateindexesloop:
+ add [rdi], al
+ movzx ebx, byte [rdi]
+ cmp bl, [rsi]
+ jl .eindexupdate ; quit out of loop at slot index not higher from increment
+ mov [rdi], byte 0
+ inc rsi
+ inc rdi
+ loop .updateindexesloop
+.eindexupdate:
+ ; decide whether to keep looping
+ mov rdi, [rel outputfill]
+ cmp rdi, ((1024*1024)-512) ; more than two strings
+ jge .epermloop
+ dec r14
+ jnz permloop
+.epermloop:
+ mov [rel combisleft], r14 ; update combis left
+ ; print output
+ mov rdx, rdi
+ mov eax, sys_write
+ mov edi, stdout
+ mov esi, outbuff
+ syscall
+ cmp [rel combisleft], dword 0
+ jg permcalc ; don't exit until all permutations are finished
+
+nomex:
+%include "hdrs/perftimerend.ah"
+ nominal_exit
+
+; errors
+badslot: ; a slot got skipped and fucks up the permutation calculation
+slotoutofbounds: ; slot index over 15
+substringoutofbounds: ; substring index over 15
+badvariants: ; bad variant string
+lowargs: ; only template string
+noargs: ; no args
+catex:
+ catastrophic_exit
+snoargs: db "PERM: Has no args.",0xa
+
+nl: db 0xa
+atsym: db '@'
+comma: db ','
+colon: db ':' ; because commas add zeros on the command line and fuck up my parsing
+threenine: db 0x39
+seven: db 0x7
+one: db 1
+faltext: dq 0xff00ff00ff0ff00
+fext: dq 0x0f0f0f0f0f0f0f0f
+; single runtime buffer only, everything else is small enough to not need dynamic
+; gen maxes out at like 50 meg, so definitely needs to be dynamically alloced
+;msallocbumpinit 
+;msallocbumpgrow
+c_ftr
+%include "hdrs/perftimermem.ah"
+; loose data that does not need
+slotcount: resb 1 ; count of slots, up to 16
+partitioncount: resb 1
+alignb 64 ; loose data that can be aligned to a cache line
+combisleft: resq 1; how many combinations are left 
+outputp: resq 1; location of output buffer in memory
+outputhead: resq 1; location of write head in output buffer
+outputfill: resq 1 ; count of bytes filled in output buffer
+; arrays that are smaller than a cache line but still aligned to it
+alignb 64 
+slotvariantcounts: resb 16 ; count of variations in each slot
+tempindexes: resb 16 ; temporary variant indexes while generating the strings
+; arrays that are equal to or larger than a cache line but smaller than 256 bytes
+alignb 64
+tstringpartitions: resb 64 ; partition indexes in template string
+tstringvariants: resb 64 ; indexes into variant cache per tstring partition
+tstringvariantsubstrings: resb 64 ; which substring to choose within this variant
+;variantcache: resb (16*16*32) ; 16 substring string indexes per slot, 16 slots:
+; massive arrays that are equal to 256 bytes or larger
+alignb 4096
+stringcache: resb (256*8) ; generate 8 strings at once before copying to output
+substrings: resb (32*16*16*8) ; 16 substrings, length 32 for max 4 variants per slot
+templatestring: resb 256
+alignb 4096
+outbuff: resb (1024*1024) ; 1 meg output max, repeat write to stdout for larger output
+e_bss

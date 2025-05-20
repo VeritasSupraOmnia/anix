@@ -1,0 +1,37 @@
+%ifdef perftest ; use return value as tsc deltas - fuck posix BS
+ ; calculate time taken to print filename list
+ mov rax, [timestart]
+%include "hdrs/hexconv.ah"
+ movdqu [timehex+6], xmm1
+ mov [timehex], dword "TOT:"
+ ; print hex.
+ mov [timehex+4], word "0x"
+ mov [timehex+22], byte 0xa
+
+; mov edi, 2
+ mov eax, sys_write
+ mov edi, eax
+ inc edi
+ mov esi, timehex
+ mov edx, 23
+ syscall
+%endif
+%macro ptimerprint 1
+
+%ifdef perftest
+ mov rax, [%1]
+%include "hdrs/hexconv.ah"
+ %defstr %%name %1
+ mov [%1_mem], dword %%name
+ mov [%1_mem+3], byte ":"
+ movdqu [%1_mem+6], xmm1
+ mov [%1_mem+4], word "0x"
+ mov [%1_mem+22], byte 0xa
+ mov eax, sys_write
+ mov edi, eax
+ inc edi
+ mov esi, %1_mem
+ mov edx, 23
+ syscall
+%endif
+%endmacro 

@@ -1,0 +1,10 @@
+%ifdef perftest
+ timestart: resq 1
+ timehex: resb 23
+%endif
+%macro ptimermem 1
+%ifdef perftest
+ %[%1]: resq 1
+ %[%1]_mem: resb 23
+%endif
+%endmacro

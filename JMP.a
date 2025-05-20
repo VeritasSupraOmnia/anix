@@ -1,0 +1,2 @@
+; Instead of jumping directly to a directory path via CD, searches the local directory for most likely directory matches (at least one letter match), 
+;  then 

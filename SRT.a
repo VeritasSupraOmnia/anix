@@ -1,0 +1,81 @@
+; SORT - sorts lines alphabetically, but fast and not accurately (bc its not needed
+;  most of the time).
+
+; Translate start of all strings to list of byteswapped dwords so that the first
+;  byte in each string is always positioned in the most significant byte.
+; During this translation read, also count the amount of strings. After translation,
+;  select the proper sorting method, using bubble sort if the count of entries is 
+;  low enough.
+; Then generate an index field based on the total count of entries and integrate that
+;  into the 
+%include "head.ah"
+%include "syscall.ah"
+%include "sectalloc.ah"
+c_fehdr main
+%define buffsize 1024*1024
+main:
+ nop
+%include "hdrs/perftimerstart.ah"
+callsallocinit:
+ xor eax, eax
+ mov r15d, .ret
+ jmp sallocbumpinit
+.ret:
+ mov [rel allocp], rax ; save start of heap
+ %define stringsp allocp ; start of strings array is also start of allocation 
+
+
+readloop: ; read strings into the 
+ xor r14, r14 ; current size of heap in bytes
+.li: ; loop iteration
+ xor eax, eax
+ lea rsi, [inbuff+r15]
+ xor edi, edi
+ mov esi, inbuff
+ mov edx, buffsize
+ syscall
+ cmp eax, 0
+ jle .el
+ add r14, rax
+ ; calculate new section count
+ mov rax, r14
+ shr rax, salloc_sectshift
+ inc rax ; always have a spare section handy
+ mov rbx, [rel allocp]
+ mov ebx, [rbx-4] ; find current section count
+ sub rbx, rax ; find amount to grow, not growing if equal section plus extra
+ jae .growret
+ mov rax, [rel allocp]
+ mov rdi, rbx
+ mov r15, .growret
+ jmp sallocbumpgrow
+.growret:
+ jmp .li
+.el: ; exit loop
+ mov [rel stringss], r14 ; size of strings array
+initialsearch:
+ ; search through string
+
+nomex:
+%include "hdrs/perftimerend.ah"
+ nominal_exit
+
+emptyinput:
+noargs:
+ catastrophic_exit
+nl: db 0xa
+ws: db 0x20
+msallocbumpinit
+msallocbumpgrow
+c_ftr
+%include "hdrs/perftimermem.ah"
+allocp: resq 1
+alignb 64
+stringsc: resd 1
+stringss: resd 1
+alignb 4096
+inbuff: resb buffsize
+outbuff: resb buffsize
+linebuff: resb buffsize
+transbuff: resb buffsize
+e_bss
